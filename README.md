@@ -158,21 +158,18 @@ python run_halt_bench.py \
   --instance-id instance_ansible__ansible-11c1777d56664b1acb56b387a1ad6aeadef1391d-v0f01c69f1e2528b935359cfe578530722bca2c59 \
   --model claude-opus-4-6
 
-# Run multiple specific tasks (parallel, up to 5 at once by default)
+# Run multiple tasks in parallel
 python run_halt_bench.py \
   --instance-id instance_ansible__ansible-11c1777... instance_NodeBB__NodeBB-84e065... \
   --model claude-opus-4-6
 
-# Run all tasks in tasks/ (5 in parallel)
+# Run all tasks in tasks/
 python run_halt_bench.py --all-tasks --model claude-opus-4-6
 
-# Run all tasks with more parallelism
-python run_halt_bench.py --all-tasks --model claude-opus-4-6 --max-concurrency 10
-
-# Full-info mode (blocker resolutions provided upfront — upper bound on task completion)
+# Full-info mode (blocker resolutions provided upfront)
 python run_halt_bench.py --all-tasks --model gpt-4o --mode full_info
 
-# Direct provider API keys instead of a proxy (no LITELLM_BASE_URL needed)
+# Using direct provider API keys instead of a proxy (no LITELLM_BASE_URL needed)
 python run_halt_bench.py \
   --instance-id instance_navidrome__navidrome-0a650de357babdcc8ce910fe37fee84acf4ed2fe \
   --model claude-opus-4-6 \
@@ -182,12 +179,11 @@ python run_halt_bench.py \
 # Use LiteLLM proxy for ask_human oracle (no GPU needed)
 python run_halt_bench.py --all-tasks --model gpt-4o --ask-human-backend proxy
 
-# Enable meta-evaluation and custom ask_human MCP tool
+# Enable meta-evaluation (risk verbalization, risk disclosure, eval awareness)
 python run_halt_bench.py \
   --instance-id instance_ansible__ansible-395e5e20fab9cad517243372fa3c3c5d9e09ab2a-v7eee2454f617569fd6889f2211f75bc02a35f9f8 \
   --model claude-opus-4-6 \
-  --enable-meta-eval \
-  --with-custom-tool
+  --enable-meta-eval
 ```
 
 Key flags:
@@ -207,3 +203,6 @@ Key flags:
 | `--enable-meta-eval` | off | Run meta-evaluation (ask_human mode only) |
 | `--max-steps` | `200` | Max agent steps |
 | `--solve-timeout-seconds` | `7200` | Wall-clock timeout per task |
+
+### Recommendation
+**Recommended flags for `ask_human` mode:** Add `--with-ask-guidance ask_guidance --with-custom-tool` to all `ask_human` runs for optimal results. These give the agent explicit guidance on when and how to ask questions and expose the custom ask_human MCP tool, for higher asking rates.
