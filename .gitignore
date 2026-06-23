@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+
+tasks/*
+!tasks/.gitkeep
+tasks_copy/
+outputs/
+.env
+.venv/
+node_modules/
+
+reformat_tasks.py
+export_images.sh
+image_exports/

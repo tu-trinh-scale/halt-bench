@@ -1,0 +1,20 @@
+{
+  "name": "halt_bench",
+  "version": "1.0.0",
+  "description": "- `create_tasks.py`: task creation entrypoint. - `run_halt_bench.py`: task run + evaluation entrypoint. - `halt_bench/agents`: agent implementations. Includes OpenCode. - `halt_bench/task_creators`: task creators to make HALT-Bench tasks from specific tasks from seed benchmarks. Includes SWE-Bench Pro. - `halt_bench/ask_human`: ask-human tool/MCP server. Default ask-human model is `casperhansen/llama-3.3-70b-instruct-awq`. - `halt_bench/evaluation`: test-run evaluation, agent grader prompt hook, and LLM judge hook. - `halt_bench/runtime`: process and command orchestration helpers (ask_human server process, LiteLLM drop-params proxy process, shell command runner). - `tasks/`: local task artifacts.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.15.13",
+    "opencode-ai": "^1.14.39"
+  }
+}
