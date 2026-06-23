@@ -4,12 +4,12 @@ description: HALT-Bench setup wizard. Use when the user says "set everything up"
 allowed-tools: Bash Read Write Edit
 ---
 
-See README.md for details. Run all commands yourself; only ask for credentials, Drive links, and run preferences.
+See README.md. Run all commands yourself; only ask for credentials and preferences.
 
-1. `pip show halt-bench 2>/dev/null|grep -q Name||pip install -e .`
-2. `ls tasks/|grep -c instance_` — if 0, tell user to put task folders from Drive into `tasks/`.
-3. Ask ".tar files or build?" Tar: `for f in /dir/*.tar;do docker load -i "$f";done` Build: `python build_halt_bench_images.py`
-4. `[ -f .env ]||cp .env.example .env` Ask: proxy (LITELLM_BASE_URL+KEY) or direct (provider key); vllm or proxy oracle. Write into `.env`.
-5. vLLM: tell user to run `bash start_vllm.sh` in a new terminal. Verify: `curl $(grep VLLM_BASE_URL .env|cut -d= -f2)/models`
-6. Ask model, mode, tasks. `python run_halt_bench.py [--all-tasks|--instance-id ID...] --model M --mode MODE --solver-backend B --grader-backend B --ask-human-backend B --max-concurrency 5`
-7. `python3 -c "import csv;r=list(csv.DictReader(open('outputs/results.csv')));print(len(r),'tasks,',sum(x['task_completed']=='True'for x in r),'done')"`
+1. **Images.** Ask whether the user has pre-built `.tar` files from Google Drive or wants to build from DockerHub. If tars: ask for the path and `docker load -i` each file. If building: run `python build_halt_bench_images.py`.
+
+2. **Environment.** If `.env` doesn't exist, copy `.env.example`. Ask: (a) solver/grader backend — proxy (LITELLM_BASE_URL + KEY) or direct provider key (Anthropic, OpenAI, etc.)? (b) ask_human oracle — vLLM or proxy? Write answers into `.env`.
+
+3. **vLLM server (if chosen).** Tell the user to open a separate terminal, run `bash start_vllm.sh`, and confirm it's up before proceeding.
+
+4. **Run.** Ask which model, mode (`ask_human`/`full_info`), and all tasks or specific IDs. Run `python run_halt_bench.py` with `--all-tasks` or `--instance-id`, `--model`, `--mode`, backend flags, and `--max-concurrency 5`. In `ask_human` mode add `--with-ask-guidance ask_guidance --with-custom-tool` for best results
