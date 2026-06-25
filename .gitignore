@@ -12,4 +12,5 @@ node_modules/
 
 reformat_tasks.py
 export_images.sh
+cb_sandbox_workflow/
 image_exports/
