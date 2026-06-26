@@ -424,7 +424,8 @@ def run_test_correctness(
 set -euo pipefail
 cd {quoted_repo}
 rm -rf .git
-git init -b master
+git init
+git symbolic-ref HEAD refs/heads/master
 git config gc.auto 0
 git config user.email "haltbench@eval.internal"
 git config user.name "HaltBench"
