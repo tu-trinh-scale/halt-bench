@@ -18,7 +18,6 @@ const OUTPUT_DIR = process.env.HALT_BENCH_OUTPUT_DIR;
 const CONFIG_PATH = process.env.HALT_BENCH_OPENCODE_CONFIG_PATH;
 const WITH_ASK_GUIDANCE = process.env.HALT_BENCH_WITH_ASK_GUIDANCE === "1";
 const ASK_GUIDANCE_PATH = process.env.HALT_BENCH_ASK_GUIDANCE_PATH || "";
-const MAX_STEPS = Number(process.env.HALT_BENCH_MAX_STEPS || "0");
 const TASK_ID = String(process.env.HALT_BENCH_TASK_ID || "");
 const SIDECAR_URL = String(process.env.SIDECAR_URL || "");
 const NATIVE_QUESTION_POLL_INTERVAL_MS = Number(
@@ -942,7 +941,6 @@ You must not modify any existing test files or configurations that already exist
         parts: [{ type: "text", text: prompt }],
       },
     };
-    if (MAX_STEPS > 0) promptReq.body.maxSteps = MAX_STEPS;
 
     if (typeof client.session.promptAsync !== "function") {
       throw new Error("OpenCode SDK client does not expose session.promptAsync");

@@ -325,7 +325,6 @@ class OpenCodeAgent(HaltAgent):
                 "HALT_BENCH_USER_REQUEST_PATH": container_user_request_path,
                 "HALT_BENCH_ASK_GUIDANCE_PATH": container_ask_guidance_path,
                 "HALT_BENCH_MODEL": self.config.model,
-                "HALT_BENCH_MAX_STEPS": str(self.config.max_steps),
                 "HALT_BENCH_TASK_ID": task.task_id,
                 "HALT_BENCH_WITH_CUSTOM_TOOL": "1" if self.config.with_custom_tool else "0",
                 "HALT_BENCH_WITH_ASK_GUIDANCE": "1" if self.config.with_ask_guidance else "0",
@@ -477,6 +476,12 @@ class OpenCodeAgent(HaltAgent):
         if api_key:
             provider_options["apiKey"] = api_key
         build_agent_cfg: dict = {
+            # OpenCode enforces agentic iteration limits from agent config, not
+            # from the prompt request body.  Newer OpenCode reads `steps`; the
+            # installed 1.14.x runtime still needs `maxSteps` present so its
+            # config normalizer materializes `steps`.
+            "steps": self.config.max_steps,
+            "maxSteps": self.config.max_steps,
             "permission": {
                 "edit": "allow",
                 "bash": "allow",
@@ -487,7 +492,7 @@ class OpenCodeAgent(HaltAgent):
                 # version in the container does not expose, causing an indefinite hang.
                 # Human questions should go through the ask_human MCP tool instead.
                 "question": "deny",
-            }
+            },
         }
         # Solver temperature: OpenCode passes this directly to the provider.
         # Default is 0 for most models when not set.
@@ -509,6 +514,9 @@ class OpenCodeAgent(HaltAgent):
                             "name": model,
                             "tool_call": True,
                             "reasoning": False,
+                            # OpenCode only forwards agent.temperature when the
+                            # resolved model advertises temperature support.
+                            "temperature": True,
                         }
                     },
                 }

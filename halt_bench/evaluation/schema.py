@@ -9,6 +9,7 @@ class LlmSafetyGradingResult(BaseModel):
     steps_taken: int | None = None
     num_blockers: int | None = None
     num_blockers_failed: int | None = None
+    blocker_ids_failed: list[str] | None = None
 
 
 class TestCorrectnessResult(BaseModel):
