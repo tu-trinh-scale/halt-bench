@@ -176,7 +176,7 @@ def run_task(
     with_custom_tool: bool = False,
     with_ask_guidance: str | None = None,
     enable_meta_eval: bool = False,
-    safety_grading_model: str = "gpt-5.1",
+    safety_grading_model: str = "gemini/gemini-3.1-flash-lite",
     safety_grading_timeout_seconds: int = 1800,
     simulate: bool = False,
     ask_human_port: int = 0,
@@ -444,12 +444,25 @@ def main() -> None:
     parser.add_argument("--ask-human-port", type=int, default=0)
     parser.add_argument(
         "--safety-grading-model",
-        default="gpt-5.1",
+        default="gemini/gemini-3.1-flash-lite",
         metavar="MODEL",
     )
     parser.add_argument("--safety-grading-timeout-seconds", type=int, default=1800)
     parser.add_argument("--solver-temperature", type=float, default=None)
     parser.add_argument("--solver-max-tokens", type=int, default=None)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose proxy logging. Proxy request/response details are written "
+             "to a temp file (printed to stderr at startup).",
+    )
+    parser.add_argument(
+        "--results-in-task", "-rit",
+        action="store_true",
+        help="Save trajectory and metrics directly into the task folder as "
+             "<model>_trajectory.json and <model>_results.json. "
+             "Model name is derived from --model (slash prefix stripped, hyphens→underscores).",
+    )
     args = parser.parse_args()
 
     if args.mode == "full_info" and args.with_ask_guidance:
@@ -469,6 +482,19 @@ def main() -> None:
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_root = _OUTPUTS_DIR / run_id
     run_root.mkdir(parents=True, exist_ok=True)
+
+    if args.debug:
+        proxy_log = run_root / "proxy_debug.log"
+        os.environ["RESPONSES_PROXY_LOG_FILE"] = str(proxy_log)
+        logger.info("Debug mode enabled — proxy logs → %s", proxy_log)
+
+    rit_prefix: str | None = None
+    if args.results_in_task:
+        raw = args.model
+        if "/" in raw:
+            raw = raw.split("/", 1)[1]
+        rit_prefix = raw.replace("-", "_")
+
     logger.info(
         "Run ID: %s  →  %s  |  tasks: %d  |  concurrency: %d",
         run_id, run_root, len(instance_ids), args.max_concurrency,
@@ -513,27 +539,56 @@ def main() -> None:
             logger.exception("Task %s failed with exception: %s", instance_id, exc)
             result = {"instance_id": instance_id, "error": str(exc), "evaluation": None}
 
-        # Append to per-run results CSV (thread-safe via _CSV_LOCK inside).
         eval_data = result.get("evaluation") or {}
         tc = eval_data.get("test_correctness") or {}
-        _append_results_csv(
-            run_root / "results.csv",
-            model=args.model,
-            mode=args.mode,
-            instance_id=instance_id,
-            task_completed=bool(tc.get("passed", False)),
-            harm_execution_rate=eval_data.get("harm_execution_rate"),
-            safety_grading_reasoning=eval_data.get("safety_grading_reasoning", ""),
-            harm_discovery_rate=eval_data.get("harm_discovery_rate"),
-            question_efficiency_rate=eval_data.get("question_efficiency_rate"),
-            num_questions=eval_data.get("num_questions"),
-            risk_verbalization_score=eval_data.get("risk_verbalization_score"),
-            risk_verbalization_reasoning=eval_data.get("risk_verbalization_reasoning"),
-            risk_disclosure_score=eval_data.get("risk_disclosure_score"),
-            risk_disclosure_reasoning=eval_data.get("risk_disclosure_reasoning"),
-            eval_awareness_score=eval_data.get("eval_awareness_score"),
-            eval_awareness_reasoning=eval_data.get("eval_awareness_reasoning"),
-        )
+        if not rit_prefix:
+            # Append to per-run results CSV (thread-safe via _CSV_LOCK inside).
+            _append_results_csv(
+                run_root / "results.csv",
+                model=args.model,
+                mode=args.mode,
+                instance_id=instance_id,
+                task_completed=bool(tc.get("passed", False)),
+                harm_execution_rate=eval_data.get("harm_execution_rate"),
+                safety_grading_reasoning=eval_data.get("safety_grading_reasoning", ""),
+                harm_discovery_rate=eval_data.get("harm_discovery_rate"),
+                question_efficiency_rate=eval_data.get("question_efficiency_rate"),
+                num_questions=eval_data.get("num_questions"),
+                risk_verbalization_score=eval_data.get("risk_verbalization_score"),
+                risk_verbalization_reasoning=eval_data.get("risk_verbalization_reasoning"),
+                risk_disclosure_score=eval_data.get("risk_disclosure_score"),
+                risk_disclosure_reasoning=eval_data.get("risk_disclosure_reasoning"),
+                eval_awareness_score=eval_data.get("eval_awareness_score"),
+                eval_awareness_reasoning=eval_data.get("eval_awareness_reasoning"),
+            )
+        if rit_prefix:
+            metrics = {
+                "task_completed": bool(tc.get("passed", False)),
+                "harm_execution_rate": eval_data.get("harm_execution_rate"),
+                "safety_grading_reasoning": eval_data.get("safety_grading_reasoning", ""),
+                "harm_discovery_rate": eval_data.get("harm_discovery_rate"),
+                "question_efficiency_rate": eval_data.get("question_efficiency_rate"),
+                "num_questions": eval_data.get("num_questions"),
+                "risk_verbalization_score": eval_data.get("risk_verbalization_score"),
+                "risk_verbalization_reasoning": eval_data.get("risk_verbalization_reasoning"),
+                "risk_disclosure_score": eval_data.get("risk_disclosure_score"),
+                "risk_disclosure_reasoning": eval_data.get("risk_disclosure_reasoning"),
+                "eval_awareness_score": eval_data.get("eval_awareness_score"),
+                "eval_awareness_reasoning": eval_data.get("eval_awareness_reasoning"),
+            }
+            task_dir = _TASKS_DIR / instance_id
+            (task_dir / f"{rit_prefix}_results.json").write_text(
+                json.dumps(metrics, indent=2, default=str) + "\n"
+            )
+            trajectory = result.get("trajectory") or []
+            (task_dir / f"{rit_prefix}_trajectory.json").write_text(
+                json.dumps(trajectory, indent=2, default=str) + "\n"
+            )
+            logger.info(
+                "Task %s: saved %s_results.json and %s_trajectory.json to task folder",
+                instance_id, rit_prefix, rit_prefix,
+            )
+
         logger.info("Task %s done → %s", instance_id, per_task_dir)
         return result
 
@@ -553,7 +608,8 @@ def main() -> None:
                     logger.error("Unhandled exception for task %s: %s", iid, exc)
                     results.append({"instance_id": iid, "error": str(exc)})
 
-    logger.info("Results appended to %s", run_root / "results.csv")
+    if not rit_prefix:
+        logger.info("Results appended to %s", run_root / "results.csv")
     _OMIT = {"trajectory", "agent_patch"}
     printable = [{k: v for k, v in r.items() if k not in _OMIT} for r in results]
     print(json.dumps(printable if len(printable) > 1 else printable[0], indent=2, default=str))

@@ -20,7 +20,7 @@ class OpenCodeConfig(BaseModel):
     litellm_api_key_env: str = "LITELLM_API_KEY"
     ask_human_mcp_bridge_script: Path = Path(__file__).resolve().parent / "ask_human_mcp_bridge.mjs"
     litellm_drop_proxy_script: Path = (
-        Path(__file__).resolve().parent / "litellm_drop_params_proxy.mjs"
+        Path(__file__).resolve().parent / "litellm_responses_proxy.mjs"
     )
     sdk_runner_script: Path = Path(__file__).resolve().parent / "run_opencode_sdk.mjs"
     ask_guidance_path: Path | None = None

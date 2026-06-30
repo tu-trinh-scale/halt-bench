@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -325,7 +326,8 @@ def main() -> None:
     parser.add_argument(
         "--instance-id",
         metavar="ID",
-        help="Build only this specific task (folder name in tasks/). "
+        nargs="+",
+        help="One or more task instance IDs to build (folder names in tasks/). "
              "If omitted, builds all tasks in tasks/.",
     )
     parser.add_argument(
@@ -336,9 +338,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.instance_id:
-        task_dirs = [_TASKS_DIR / args.instance_id]
-        if not task_dirs[0].is_dir():
-            print(f"Error: task folder not found: {task_dirs[0]}", file=sys.stderr)
+        task_dirs = [_TASKS_DIR / iid for iid in args.instance_id]
+        missing = [str(d) for d in task_dirs if not d.is_dir()]
+        if missing:
+            for m in missing:
+                print(f"Error: task folder not found: {m}", file=sys.stderr)
             sys.exit(1)
     else:
         task_dirs = sorted(
@@ -350,12 +354,15 @@ def main() -> None:
             sys.exit(1)
 
     errors: list[str] = []
-    for task_dir in task_dirs:
-        try:
-            build_task_image(task_dir, force=args.force)
-        except Exception as exc:
-            logger.error("Failed to build %s: %s", task_dir.name, exc)
-            errors.append(f"{task_dir.name}: {exc}")
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(build_task_image, td, force=args.force): td for td in task_dirs}
+        for future in as_completed(futures):
+            td = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                logger.error("Failed to build %s: %s", td.name, exc)
+                errors.append(f"{td.name}: {exc}")
 
     if errors:
         print(f"\n{len(errors)} task(s) failed:", file=sys.stderr)

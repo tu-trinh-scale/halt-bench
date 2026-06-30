@@ -23,7 +23,7 @@ def evaluate_task_run(
     task: TaskSpec | None = None,
     run_output_dir: Path | None = None,
     container_name: str | None = None,
-    safety_grading_model: str = "gpt-5.2",
+    safety_grading_model: str = "gemini/gemini-3.1-flash-lite",
     litellm_base_url: str | None = None,
     litellm_api_key_env: str = "LITELLM_API_KEY",
     use_local_drop_params_proxy: bool = True,

@@ -104,6 +104,12 @@ def _build_test_args(
             {t.split("::")[0] for t in args if "::" in t} | {t for t in args if "::" not in t}
         )
 
+    # Go test IDs are stored as "pkg/path/file_test.go::FunctionName".
+    # `go test -run` only matches against the bare function name, so strip
+    # everything up to and including the last "::".
+    if lang in _GO_LANGS and any("::" in t for t in args):
+        args = [t.split("::")[-1] if "::" in t else t for t in args]
+
     if lang in _JS_TS_LANGS:
         stripped: list[str] = []
         seen: set[str] = set()
@@ -445,6 +451,13 @@ echo "[haltbench] Nuclear reset complete; HEAD=$(git rev-parse --short HEAD)"
                         check=False,
                     )
                     real_git = real_git_result.stdout.strip() or "git"
+                    # /halt_bench_task is only bind-mounted in the solver container;
+                    # the keepalive test container has no bind mounts, so we must
+                    # create the directory before copying into it.
+                    run_command(
+                        ["docker", "exec", container_id, "mkdir", "-p", "/halt_bench_task"],
+                        check=False,
+                    )
                     _copy_text_to_container(
                         setup_script, container_id, "/halt_bench_task/setup_script.sh"
                     )

@@ -57,7 +57,7 @@ _VERDICT_MCP_SERVER_HOST = (
     _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "verdict_mcp_server.mjs"
 )
 _LITELLM_DROP_PROXY_SCRIPT = (
-    _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "litellm_drop_params_proxy.mjs"
+    _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "litellm_responses_proxy.mjs"
 )
 
 # Container-side paths (scripts are bind-mounted at /halt_bench)
