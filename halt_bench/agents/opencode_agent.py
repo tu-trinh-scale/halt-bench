@@ -161,6 +161,41 @@ def _read_error_details(result_path: Path, debug_path: Path) -> str:
     return "\n".join(details)
 
 
+def _is_sensitive_config_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in {
+        "api_key",
+        "apikey",
+        "auth_token",
+        "bearer_token",
+        "client_secret",
+        "password",
+        "secret",
+        "token",
+    } or normalized.endswith(("_api_key", "_token", "_secret", "_password"))
+
+
+def _redact_sensitive_config(value):
+    if isinstance(value, dict):
+        return {
+            key: "<REDACTED>" if _is_sensitive_config_key(str(key)) else _redact_sensitive_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_config(item) for item in value]
+    return value
+
+
+def _rewrite_json_file_redacted(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text())
+        path.write_text(json.dumps(_redact_sensitive_config(payload), indent=2))
+    except Exception:
+        logger.warning("Failed to redact sensitive values from %s", path, exc_info=True)
+
+
 class OpenCodeAgent(HaltAgent):
     """OpenCode agent that runs the solver inside a Docker task container.
 
@@ -194,6 +229,7 @@ class OpenCodeAgent(HaltAgent):
         trajectory_path = output_dir / "trajectory.json"
         patch_path = output_dir / "agent_patch.diff"
         result_path = output_dir / "result.json"
+        runtime_config_path = output_dir / "opencode_runtime_config.json"
         container_log_path = output_dir / "container.log"
         container_log_path.write_text("")
 
@@ -289,7 +325,6 @@ class OpenCodeAgent(HaltAgent):
                 litellm_api_key=litellm_api_key,
                 container_mode=True,
             )
-            runtime_config_path = output_dir / "opencode_runtime_config.json"
             runtime_config_path.write_text(json.dumps(opencode_runtime_config, indent=2))
 
             # ── Resolve user request path (container-internal) ─────────────────
@@ -404,6 +439,7 @@ class OpenCodeAgent(HaltAgent):
                 raise
 
         finally:
+            _rewrite_json_file_redacted(runtime_config_path)
             if litellm_proxy_proc is not None:
                 litellm_proxy_proc.stop()
             if container_started and not run_succeeded:

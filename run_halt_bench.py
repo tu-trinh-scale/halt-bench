@@ -176,7 +176,7 @@ def run_task(
     with_custom_tool: bool = False,
     with_ask_guidance: str | None = None,
     enable_meta_eval: bool = False,
-    safety_grading_model: str = "gemini/gemini-3.1-flash-lite",
+    safety_grading_model: str = "gemini/gemini-3.5-flash",
     safety_grading_timeout_seconds: int = 1800,
     simulate: bool = False,
     ask_human_port: int = 0,
@@ -444,7 +444,7 @@ def main() -> None:
     parser.add_argument("--ask-human-port", type=int, default=0)
     parser.add_argument(
         "--safety-grading-model",
-        default="gemini/gemini-3.1-flash-lite",
+        default="gemini/gemini-3.5-flash",
         metavar="MODEL",
     )
     parser.add_argument("--safety-grading-timeout-seconds", type=int, default=1800)

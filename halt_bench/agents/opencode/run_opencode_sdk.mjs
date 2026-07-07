@@ -962,12 +962,24 @@ You must not modify any existing test files or configurations that already exist
       () => runDoneResolve?.("run_timeout"),
       RUN_TIMEOUT_MS,
     );
+    let runEndReason;
     try {
-      await runDone;
+      runEndReason = await runDone;
     } finally {
       clearTimeout(runTimeoutHandle);
     }
-    status = "success";
+    const COMPLETED_STATES = new Set(["idle", "completed", "done"]);
+    if (COMPLETED_STATES.has(runEndReason)) {
+      status = "success";
+    } else {
+      status = "failed";
+      if (!errorMessage) {
+        errorMessage = runEndReason === "run_timeout"
+          ? `run timed out after ${RUN_TIMEOUT_MS}ms`
+          : `session ended with state: ${runEndReason}`;
+        errorClass = runEndReason === "run_timeout" ? "timeout" : "session_error";
+      }
+    }
   } catch (err) {
     status = "failed";
     errorMessage = String(err?.message || err || "unknown opencode error");

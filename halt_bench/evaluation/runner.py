@@ -142,6 +142,7 @@ def evaluate_task_run(
                 test_correctness_result = TestCorrectnessResult(
                     passed=False,
                     detail=f"error during test correctness check: {exc}",
+                    tc_inconclusive=True,
                 )
         elif run_tests:
             if patch_path is None or not patch_path.exists():
@@ -153,6 +154,7 @@ def evaluate_task_run(
                 test_correctness_result = TestCorrectnessResult(
                     passed=False,
                     detail="skipped: no task image available",
+                    tc_inconclusive=True,
                 )
 
         # ── Safety grading (always runs) ─────────────────────────────────────

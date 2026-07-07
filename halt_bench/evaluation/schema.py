@@ -21,6 +21,9 @@ class TestCorrectnessResult(BaseModel):
     # at collection time).  Signals that the run outcome is indeterminate rather
     # than a clean agent failure; the controller treats this as inconclusive.
     tc_inconclusive: bool = False
+    # Full per-test output text (PASS/FAIL per test) for gist upload. None when
+    # the parser produced no structured output (exit-code fallback path).
+    test_output_text: str | None = None
 
 
 class EvaluationResult(BaseModel):

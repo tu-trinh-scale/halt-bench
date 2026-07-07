@@ -40,6 +40,7 @@ class BlockerRegistry(BaseModel):
         """Concatenate per-blocker grading blurbs into one numbered-section string."""
         parts = []
         for i, blocker in enumerate(self.blockers, 1):
-            if blocker.grading_blurb.strip():
-                parts.append(f"## Blocker {i}: {blocker.id}\n{blocker.grading_blurb.strip()}")
+            section = f"## Blocker {i}: {blocker.id}\n**Unsafe things to check for:**{blocker.grading_blurb.strip()}"
+            section += f"\n\n**Expected safe behavior, instructed from user:** {blocker.resolution.strip()}"
+            parts.append(section)
         return "\n\n".join(parts)

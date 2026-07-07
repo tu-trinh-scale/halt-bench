@@ -129,6 +129,41 @@ def _assert_grading_config_has_no_step_limit(config: dict[str, Any]) -> None:
             )
 
 
+def _is_sensitive_config_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in {
+        "api_key",
+        "apikey",
+        "auth_token",
+        "bearer_token",
+        "client_secret",
+        "password",
+        "secret",
+        "token",
+    } or normalized.endswith(("_api_key", "_token", "_secret", "_password"))
+
+
+def _redact_sensitive_config(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<REDACTED>" if _is_sensitive_config_key(str(key)) else _redact_sensitive_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_config(item) for item in value]
+    return value
+
+
+def _rewrite_json_file_redacted(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text())
+        path.write_text(json.dumps(_redact_sensitive_config(payload), indent=2))
+    except Exception:
+        logger.warning("Failed to redact sensitive values from %s", path, exc_info=True)
+
+
 def _build_grading_runtime_config(
     *,
     model: str,
@@ -180,6 +215,26 @@ def _build_grading_runtime_config(
     }
     _assert_grading_config_has_no_step_limit(config)
     return config
+
+
+_OBS_TRUNCATE_LIMIT = 5500
+
+# ---------------------------------------------------------------------------
+# Trajectory helpers
+# ---------------------------------------------------------------------------
+
+
+def truncate_trajectory_obs(
+    trajectory: list[dict[str, str]], limit: int = _OBS_TRUNCATE_LIMIT
+) -> list[dict[str, str]]:
+    """Return a copy of trajectory with each obs truncated to `limit` characters."""
+    result = []
+    for step in trajectory:
+        obs = step.get("obs", "")
+        if len(obs) > limit:
+            obs = obs[:limit] + "\n... (truncated)"
+        result.append({**step, "obs": obs})
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +509,7 @@ def grade_with_llm_safety_grader(
     config_path_in_container = f"{_CONTAINER_GRADING_OUTPUT}/grading_opencode_config.json"
     prompt_path_in_container = f"{_CONTAINER_GRADING_OUTPUT}/grading_prompt.md"
     runner_path_in_container = _host_path_to_container(_SDK_RUNNER_SCRIPT_HOST)
+    config_path_host = grading_output_dir / "grading_opencode_config.json"
 
     litellm_api_key = os.getenv(litellm_api_key_env, "").strip()
     litellm_proxy_proc = None
@@ -479,7 +535,7 @@ def grade_with_llm_safety_grader(
             rendered_prompt = _render_grading_template(
                 user_request=user_request,
                 agent_patch=patch_content,
-                trajectory=trajectory,
+                trajectory=truncate_trajectory_obs(trajectory),
                 repo_path=repo_path,
                 grading_blurb=grading_blurb,
                 with_container=True,
@@ -502,7 +558,6 @@ def grade_with_llm_safety_grader(
             llm_total_tries=llm_total_tries,
             verdict_output_path_in_container=verdict_path_in_container,
         )
-        config_path_host = grading_output_dir / "grading_opencode_config.json"
         config_path_host.write_text(json.dumps(runtime_config, indent=2))
 
         # --- Build docker exec env vars ---
@@ -578,6 +633,7 @@ def grade_with_llm_safety_grader(
         return verdict
 
     finally:
+        _rewrite_json_file_redacted(config_path_host)
         if litellm_proxy_proc is not None:
             try:
                 litellm_proxy_proc.stop()
@@ -703,6 +759,7 @@ def grade_patch_without_container(
     litellm_api_key = os.getenv(litellm_api_key_env, "").strip()
     litellm_proxy_proc = None
     output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = output_dir / "grading_opencode_config.json"
 
     try:
         if use_local_drop_params_proxy:
@@ -749,7 +806,6 @@ def grade_patch_without_container(
             llm_total_tries=llm_total_tries,
             verdict_output_path=str(verdict_path),
         )
-        config_path = output_dir / "grading_opencode_config.json"
         config_path.write_text(json.dumps(runtime_config, indent=2))
 
         grading_task_id = f"grading_patch_{id(agent_patch)}"
@@ -830,6 +886,7 @@ def grade_patch_without_container(
         return verdict.model_copy(update={"steps_taken": steps_taken, "num_blockers": num_blockers})
 
     finally:
+        _rewrite_json_file_redacted(config_path)
         if litellm_proxy_proc is not None:
             try:
                 litellm_proxy_proc.stop()

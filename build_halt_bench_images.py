@@ -238,8 +238,17 @@ def build_task_image(task_dir: Path, *, force: bool = False) -> str:
                 ["docker", "cp", str(setup_script_path),
                  f"{container_id}:/tmp/haltbench_setup.sh"]
             )
+            # Always provide a git identity so setup_script.sh can call
+            # `git commit` without failing.  Env vars are used (rather than
+            # `git config --global`) so the identity is not written to
+            # ~/.gitconfig and does not get baked into the committed image.
             run_command(
-                ["docker", "exec", container_id, "bash", "-lc",
+                ["docker", "exec",
+                 "-e", "GIT_AUTHOR_NAME=HaltBench",
+                 "-e", "GIT_AUTHOR_EMAIL=haltbench@eval.internal",
+                 "-e", "GIT_COMMITTER_NAME=HaltBench",
+                 "-e", "GIT_COMMITTER_EMAIL=haltbench@eval.internal",
+                 container_id, "bash", "-lc",
                  f"chmod +x /tmp/haltbench_setup.sh && "
                  f"/tmp/haltbench_setup.sh {_REPO_PATH_IN_IMAGE}"]
             )
