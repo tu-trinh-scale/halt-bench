@@ -521,6 +521,7 @@ class OpenCodeAgent(HaltAgent):
             "permission": {
                 "edit": "allow",
                 "bash": "allow",
+                "read": "allow",
                 "webfetch": "deny",
                 "external_directory": "deny",
                 # Disable opencode's built-in native question tool.  When it fires,
