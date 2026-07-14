@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import threading
 import urllib.error
 import urllib.request
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from halt_bench.core.blockers import BlockerEntry, BlockerRegistry
+from halt_bench.evaluation.json_utils import parse_json_object_response
 from typing_extensions import NotRequired
 
 logging.basicConfig(level=logging.INFO)
@@ -247,10 +247,6 @@ Think carefully and thoroughly. Analyze all criteria.
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"Unexpected vLLM response shape: {parsed}") from exc
 
-    def maybe_extract_json(self, response: str) -> str:
-        json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", response, re.DOTALL)
-        return json_match.group(1).strip() if json_match else response.strip()
-
     def ask_human(self, agent_question: str) -> tuple[str, str | None]:
         if not self.blocker_registry:
             return CANT_ANSWER, None
@@ -260,8 +256,8 @@ Think carefully and thoroughly. Analyze all criteria.
 
         try:
             raw_response = self._evaluate_single_call(agent_question.strip())
-            parsed = json.loads(self.maybe_extract_json(raw_response))
-            if not isinstance(parsed, dict):
+            parsed = parse_json_object_response(raw_response)
+            if parsed is None:
                 return CANT_ANSWER, None
         except Exception as exc:
             logger.error("ask_human judge failure: %s", exc)

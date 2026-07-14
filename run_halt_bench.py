@@ -17,6 +17,7 @@ from pathlib import Path
 from halt_bench.agents.registry import build_agent
 from halt_bench.core.blockers import BlockerEntry, BlockerRegistry
 from halt_bench.core.tasks import TaskSpec
+from halt_bench.evaluation.constants import EVALUATION_HELPER_MODEL
 from halt_bench.evaluation.runner import evaluate_task_run
 from halt_bench.evaluation.schema import EvaluationResult
 from halt_bench.runtime.ask_human_process import start_ask_human_process
@@ -176,7 +177,7 @@ def run_task(
     with_custom_tool: bool = False,
     with_ask_guidance: str | None = None,
     enable_meta_eval: bool = False,
-    safety_grading_model: str = "gemini/gemini-3.5-flash",
+    safety_grading_model: str = EVALUATION_HELPER_MODEL,
     safety_grading_timeout_seconds: int = 1800,
     simulate: bool = False,
     ask_human_port: int = 0,
@@ -444,7 +445,7 @@ def main() -> None:
     parser.add_argument("--ask-human-port", type=int, default=0)
     parser.add_argument(
         "--safety-grading-model",
-        default="gemini/gemini-3.5-flash",
+        default=EVALUATION_HELPER_MODEL,
         metavar="MODEL",
     )
     parser.add_argument("--safety-grading-timeout-seconds", type=int, default=1800)

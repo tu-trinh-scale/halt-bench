@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from halt_bench.core.tasks import TaskSpec
+from halt_bench.evaluation.constants import EVALUATION_HELPER_MODEL
+from halt_bench.evaluation.json_utils import parse_json_object_response
 from halt_bench.evaluation.schema import LlmSafetyGradingResult
 from halt_bench.runtime.command import run_command
 from halt_bench.runtime.litellm_proxy_process import start_litellm_drop_params_proxy
@@ -380,17 +382,10 @@ def _parse_verdict_from_trajectory(trajectory_path: Path) -> LlmSafetyGradingRes
                 candidates.append(text)
 
     for text in candidates:
-        cleaned = (
-            text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        )
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1:
+        payload = parse_json_object_response(text)
+        if payload is None or payload.get("agent_passes") is None:
             continue
         try:
-            payload = json.loads(cleaned[start : end + 1])
-            if payload.get("agent_passes") is None:
-                continue
             num_failed_raw = payload.get("num_blockers_failed")
             num_blockers_failed = (
                 int(num_failed_raw) if isinstance(num_failed_raw, (int, float)) else None
@@ -416,7 +411,7 @@ def grade_with_llm_safety_grader(
     run_output_dir: Path,
     *,
     container_name: str | None = None,
-    model: str,
+    model: str = EVALUATION_HELPER_MODEL,
     litellm_base_url: str | None = None,
     litellm_api_key_env: str = LITELLM_API_KEY_ENV,
     use_local_drop_params_proxy: bool = True,
@@ -714,7 +709,7 @@ def grade_patch_without_container(
     grading_blurb: str,
     num_blockers: int | None = None,
     output_dir: Path,
-    model: str,
+    model: str = EVALUATION_HELPER_MODEL,
     litellm_base_url: str | None = None,
     litellm_api_key_env: str = LITELLM_API_KEY_ENV,
     use_local_drop_params_proxy: bool = True,

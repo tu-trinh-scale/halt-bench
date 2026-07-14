@@ -94,10 +94,9 @@ def _start_task_container(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
+    create_cmd = [
         "docker",
-        "run",
-        "-d",
+        "create",
         "--name",
         container_name,
         "--entrypoint",
@@ -116,13 +115,50 @@ def _start_task_container(
         "/dev/null",
     ]
     logger.info("Starting task container %r from %r", container_name, image_ref)
-    result = subprocess.run(cmd, capture_output=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to start task container {container_name!r} from {image_ref!r}: "
-            f"{result.stderr.decode().strip()}"
-        )
-    logger.info("Task container %r started", container_name)
+
+    last_error = ""
+    for attempt in range(1, 4):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=30)
+        try:
+            create_result = subprocess.run(create_cmd, capture_output=True, timeout=300)
+            if create_result.returncode != 0:
+                last_error = create_result.stderr.decode(errors="replace").strip()
+                logger.warning(
+                    "docker create failed for %r on attempt %d/3: %s",
+                    container_name,
+                    attempt,
+                    last_error,
+                )
+                continue
+
+            start_result = subprocess.run(
+                ["docker", "start", container_name],
+                capture_output=True,
+                timeout=300,
+            )
+            if start_result.returncode == 0:
+                logger.info("Task container %r started", container_name)
+                return
+            last_error = start_result.stderr.decode(errors="replace").strip()
+            logger.warning(
+                "docker start failed for %r on attempt %d/3: %s",
+                container_name,
+                attempt,
+                last_error,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_error = f"{exc.cmd!r} timed out after {exc.timeout} seconds"
+            logger.warning(
+                "Docker container startup timed out for %r on attempt %d/3: %s",
+                container_name,
+                attempt,
+                last_error,
+            )
+
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=30)
+    raise RuntimeError(
+        f"Failed to start task container {container_name!r} from {image_ref!r}: {last_error}"
+    )
 
 
 def _verify_node_in_container(container_name: str) -> None:
@@ -172,7 +208,9 @@ def _is_sensitive_config_key(key: str) -> bool:
         "password",
         "secret",
         "token",
-    } or normalized.endswith(("_api_key", "_token", "_secret", "_password"))
+    } or normalized.endswith(
+        ("_api_key", "_token", "_secret", "_password", "_header", "_headers", "_cookie")
+    )
 
 
 def _redact_sensitive_config(value):
@@ -447,11 +485,18 @@ class OpenCodeAgent(HaltAgent):
                 # to grade, so clean up immediately.  On success the container is
                 # intentionally left alive for the safety grading agent;
                 # run_halt_bench.py removes it after grading completes.
-                subprocess.run(
-                    ["docker", "rm", "-f", container_name],
-                    capture_output=True,
-                    timeout=30,
-                )
+                try:
+                    subprocess.run(
+                        ["docker", "rm", "-f", container_name],
+                        capture_output=True,
+                        timeout=30,
+                    )
+                except Exception:
+                    logger.warning(
+                        f"Failed to remove container {container_name} after run failure "
+                        f"(container may need manual cleanup)",
+                        exc_info=True,
+                    )
 
         if not trajectory_path.exists():
             trajectory_path.write_text("[]")

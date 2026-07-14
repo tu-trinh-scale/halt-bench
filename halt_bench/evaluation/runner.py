@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from halt_bench.core.tasks import TaskSpec
+from halt_bench.evaluation.constants import EVALUATION_HELPER_MODEL
 from halt_bench.evaluation.llm_safety_grading import grade_with_llm_safety_grader
 from halt_bench.evaluation.meta_eval import run_meta_eval
 from halt_bench.evaluation.schema import EvaluationResult, TestCorrectnessResult
@@ -23,7 +24,7 @@ def evaluate_task_run(
     task: TaskSpec | None = None,
     run_output_dir: Path | None = None,
     container_name: str | None = None,
-    safety_grading_model: str = "gemini/gemini-3.1-flash-lite",
+    safety_grading_model: str = EVALUATION_HELPER_MODEL,
     litellm_base_url: str | None = None,
     litellm_api_key_env: str = "LITELLM_API_KEY",
     use_local_drop_params_proxy: bool = True,

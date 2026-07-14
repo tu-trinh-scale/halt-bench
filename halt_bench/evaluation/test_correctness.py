@@ -131,6 +131,96 @@ def _filter_patch(patch: str) -> str:
     return "".join(filtered)
 
 
+def _is_proton_webclients_runner(run_script: str) -> bool:
+    return "yarn workspace" in run_script and any(
+        marker in run_script
+        for marker in (
+            "proton-mail",
+            "@proton/components",
+            "proton-drive",
+            "proton-calendar",
+            "proton-account",
+            "proton-verify",
+        )
+    )
+
+
+def _proton_visible_test_runner_script() -> str:
+    return r"""#!/bin/bash
+set -e
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}"
+
+REPO_ROOT="$(pwd)"
+JEST_BIN="$REPO_ROOT/node_modules/jest/bin/jest.js"
+if [ ! -f "$JEST_BIN" ]; then
+  JEST_BIN="$REPO_ROOT/node_modules/.bin/jest"
+fi
+if [ ! -e "$JEST_BIN" ]; then
+  echo "Jest binary not found under $REPO_ROOT/node_modules" >&2
+  exit 127
+fi
+
+workspace_for_file() {
+  local file_path="$1"
+  if [[ "$file_path" == packages/components/* ]] || [[ "$file_path" == components/* ]] || [[ "$file_path" == *components* ]]; then
+    echo "packages/components"
+  elif [[ "$file_path" == applications/drive/* ]] || [[ "$file_path" == src/app/store/_shares/* ]] || [[ "$file_path" == *drive* ]]; then
+    echo "applications/drive"
+  elif [[ "$file_path" == applications/calendar/* ]] || [[ "$file_path" == *calendar* ]]; then
+    echo "applications/calendar"
+  elif [[ "$file_path" == applications/account/* ]] || [[ "$file_path" == *account* ]]; then
+    echo "applications/account"
+  elif [[ "$file_path" == applications/verify/* ]] || [[ "$file_path" == *verify* ]]; then
+    echo "applications/verify"
+  else
+    echo "applications/mail"
+  fi
+}
+
+run_one() {
+  local test_spec="$1"
+  local file_path="$test_spec"
+  local test_name=""
+
+  if [[ "$test_spec" == *"|"* ]]; then
+    file_path="$(echo "$test_spec" | cut -d'|' -f1 | xargs)"
+    test_name="$(echo "$test_spec" | cut -d'|' -f2- | xargs)"
+  fi
+
+  local workspace_dir
+  workspace_dir="$(workspace_for_file "$file_path")"
+  local pattern="$file_path"
+  if [[ "$pattern" == "$workspace_dir/"* ]]; then
+    pattern="${pattern#"$workspace_dir/"}"
+  fi
+
+  echo "Running Jest in $workspace_dir: $pattern${test_name:+ | $test_name}"
+  cd "$REPO_ROOT/$workspace_dir"
+  if [ -n "$test_name" ]; then
+    node "$JEST_BIN" --runInBand --ci --testPathPattern="$pattern" --testNamePattern="$test_name" --verbose
+  else
+    node "$JEST_BIN" --runInBand --ci --testPathPattern="$pattern" --verbose
+  fi
+  cd "$REPO_ROOT"
+}
+
+if [ $# -eq 0 ]; then
+  echo "Proton visible-test wrapper requires explicit test paths." >&2
+  exit 5
+fi
+
+if [[ "$1" == *","* ]]; then
+  IFS=',' read -r -a TEST_FILES <<< "$1"
+else
+  TEST_FILES=("$@")
+fi
+
+for test_spec in "${TEST_FILES[@]}"; do
+  run_one "$test_spec"
+done
+"""
+
+
 def _extract_test_file_path(test_id: str, language: str) -> str | None:
     lang = language.lower()
     if lang in _GO_LANGS:
@@ -225,6 +315,30 @@ def _parse_sweap_json(log: str) -> dict | None:
         pass
 
     return None
+
+
+def _merge_status(previous: str | None, new: str) -> str:
+    """Aggregate duplicate parser statuses without letting later rows hide failures."""
+    failure_statuses = {"FAILED", "ERROR"}
+    known_non_failures = {"PASSED", "SKIPPED", ""}
+    previous = previous or ""
+    new = new or ""
+
+    if previous in failure_statuses or new in failure_statuses:
+        return "FAILED" if "FAILED" in (previous, new) else "ERROR"
+
+    # Unknown non-empty statuses are failure-like and should not be hidden by a
+    # duplicate PASSED/SKIPPED row. Downstream logic rejects anything but PASSED.
+    if previous not in known_non_failures:
+        return previous
+    if new not in known_non_failures:
+        return new
+
+    if previous == "PASSED" or new == "PASSED":
+        return "PASSED"
+    if previous == "SKIPPED" or new == "SKIPPED":
+        return "SKIPPED"
+    return ""
 
 
 def _parse_sweap_json_with_required_tests(
@@ -326,11 +440,24 @@ def _parse_sweap_json_with_required_tests(
             or path2.endswith(path1)
         )
 
-    def _find_matching_required_test(parser_test_name: str) -> str | None:
-        """Find the required test that matches this parser-emitted name."""
+    def _descriptions_match(required_desc: str, parser_desc: str) -> bool:
+        """True when a parser-emitted test name adds only describe/context prefixes."""
+        if required_desc == parser_desc:
+            return True
+        return (
+            required_desc.endswith(" | " + parser_desc)
+            or parser_desc.endswith(" | " + required_desc)
+            or required_desc.endswith(" " + parser_desc)
+            or parser_desc.endswith(" " + required_desc)
+        )
+
+    def _find_matching_required_tests(parser_test_name: str) -> list[str]:
+        """Find all required tests that match this parser-emitted name."""
+        matches: list[str] = []
+
         # 1. Exact match
         if parser_test_name in required_tests:
-            return parser_test_name
+            matches.append(parser_test_name)
 
         # 2. JS/TS pipe format: "file/path | description"
         if " | " in parser_test_name:
@@ -343,28 +470,24 @@ def _parse_sweap_json_with_required_tests(
                         or req_path.endswith(parser_path)
                         or parser_path.endswith(req_path)
                     )
-                    desc_matches = (
-                        req_desc == parser_desc
-                        or req_desc.endswith(" | " + parser_desc)
-                        or parser_desc.endswith(" | " + req_desc)
-                    )
-                    if path_matches and desc_matches:
-                        return req_test
+                    desc_matches = _descriptions_match(req_desc, parser_desc)
+                    if path_matches and desc_matches and req_test not in matches:
+                        matches.append(req_test)
                 else:
                     if (
                         req_test == parser_path
                         or req_test.endswith(parser_path)
                         or parser_path.endswith(req_test)
-                    ):
-                        return req_test
-            return None
+                    ) and req_test not in matches:
+                        matches.append(req_test)
+            return matches
 
         # 3. Pytest format: optional path::func with optional [params]
         parser_path, parser_func_params, parser_func_base = _extract_pytest_components(
             parser_test_name
         )
         parser_func_base_lower = parser_func_base.lower()
-        fallback_match = None
+        fallback_matches: list[str] = []
 
         for req_test in required_tests:
             if " | " in req_test:
@@ -381,13 +504,14 @@ def _parse_sweap_json_with_required_tests(
                 continue
             if parser_path is not None and req_path is not None:
                 if _paths_match(parser_path, req_path):
-                    return req_test
-                if fallback_match is None:
-                    fallback_match = req_test
-            else:
-                return req_test
+                    if req_test not in matches:
+                        matches.append(req_test)
+                elif req_test not in fallback_matches:
+                    fallback_matches.append(req_test)
+            elif req_test not in matches:
+                matches.append(req_test)
 
-        return fallback_match
+        return matches or fallback_matches
 
     # ------------------------------------------------------------------ main loop
 
@@ -399,14 +523,15 @@ def _parse_sweap_json_with_required_tests(
         status_str = test.get("status", "").upper()
         if not test_name:
             continue
-        raw_parser_results[test_name] = status_str
+        raw_parser_results[test_name] = _merge_status(raw_parser_results.get(test_name), status_str)
         if required_tests:
-            matched = _find_matching_required_test(test_name)
-            if matched is None:
+            matched_tests = _find_matching_required_tests(test_name)
+            if not matched_tests:
                 continue
-            test_status_map[matched] = status_str
+            for matched in matched_tests:
+                test_status_map[matched] = _merge_status(test_status_map.get(matched), status_str)
         else:
-            test_status_map[test_name] = status_str
+            test_status_map[test_name] = _merge_status(test_status_map.get(test_name), status_str)
 
     # ---- Parametrized variants: bare test_foo + all test_foo[p] passed → PASSED
     if required_tests:
@@ -1313,8 +1438,16 @@ cd {quoted_repo} && PATH=/tmp/_hb_git_wrap:$PATH bash /halt_bench_task/setup_scr
                 visible_passed=True,
             )
 
-        # Copy run_script.sh and parser.py to /root/ (matches reference)
-        _copy_text_to_container(run_script, container_id, "/root/run_script.sh")
+        # Copy run_script.sh and parser.py to /root/ (matches reference).
+        # Proton webclient images have broken Yarn shims; use a direct Jest
+        # wrapper that runs from the resolved workspace and preserves
+        # "file | test name" visible IDs.
+        effective_run_script = (
+            _proton_visible_test_runner_script()
+            if language.lower() in _JS_TS_LANGS and _is_proton_webclients_runner(run_script)
+            else run_script
+        )
+        _copy_text_to_container(effective_run_script, container_id, "/root/run_script.sh")
         run_command(["docker", "exec", container_id, "chmod", "+x", "/root/run_script.sh"])
         if parser_script:
             _copy_text_to_container(parser_script, container_id, "/root/parser.py")
