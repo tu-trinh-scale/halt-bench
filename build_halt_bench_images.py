@@ -239,16 +239,30 @@ def build_task_image(task_dir: Path, *, force: bool = False) -> str:
                  f"{container_id}:/tmp/haltbench_setup.sh"]
             )
             # Always provide a git identity so setup_script.sh can call
-            # `git commit` without failing.  Env vars are used (rather than
-            # `git config --global`) so the identity is not written to
-            # ~/.gitconfig and does not get baked into the committed image.
+            # `git commit` without failing.  We point HOME at a throw-away
+            # directory and pre-write a minimal .gitconfig there rather than
+            # setting GIT_AUTHOR_NAME/GIT_COMMITTER_NAME env vars.
+            #
+            # Why not env vars?  GIT_AUTHOR_NAME sits above `-c user.name=` in
+            # git's priority order, so it silently overrides any custom author
+            # a setup script tries to commit as (e.g. a fictional teammate).
+            # That broke setup_assert checks like `git log --pretty=%an`.
+            #
+            # Why not GIT_CONFIG_GLOBAL?  That env var requires git >= 2.32;
+            # the container images ship git 2.30.
+            #
+            # HOME-based .gitconfig has *config-file* priority, which is lower
+            # than `-c user.name=` on the command line, so any setup script that
+            # does `git -c user.name="Alice" commit` correctly wins.  The temp
+            # dir lives only in the running container and is never committed into
+            # the image.
             run_command(
                 ["docker", "exec",
-                 "-e", "GIT_AUTHOR_NAME=HaltBench",
-                 "-e", "GIT_AUTHOR_EMAIL=haltbench@eval.internal",
-                 "-e", "GIT_COMMITTER_NAME=HaltBench",
-                 "-e", "GIT_COMMITTER_EMAIL=haltbench@eval.internal",
+                 "-e", "HOME=/tmp/haltbench_home",
                  container_id, "bash", "-lc",
+                 "mkdir -p /tmp/haltbench_home && "
+                 r"printf '[user]\n\tname = HaltBench\n\temail = haltbench@eval.internal\n'"
+                 " > /tmp/haltbench_home/.gitconfig && "
                  f"chmod +x /tmp/haltbench_setup.sh && "
                  f"/tmp/haltbench_setup.sh {_REPO_PATH_IN_IMAGE}"]
             )
@@ -287,11 +301,13 @@ def build_task_image(task_dir: Path, *, force: bool = False) -> str:
                     f"(exit {assert_res.returncode}). Aborting commit."
                 )
 
-        # Clean up temp files from container.
+        # Clean up temp files from container (including the throw-away HOME dir
+        # written during setup_script.sh so it is not baked into the image).
         run_command(
             ["docker", "exec", container_id, "bash", "-lc",
              "rm -f /tmp/haltbench_setup_patch.diff /tmp/haltbench_setup.sh "
-             "/tmp/haltbench_setup_assert.sh"],
+             "/tmp/haltbench_setup_assert.sh && "
+             "rm -rf /tmp/haltbench_home"],
             check=False,
         )
 
