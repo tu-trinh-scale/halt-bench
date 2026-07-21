@@ -162,6 +162,12 @@ def _snapshot_volumes(container_id: str, volume_paths: list[str]) -> dict[str, b
 # ---------------------------------------------------------------------------
 
 
+def _should_preserve_task_node(seed_image: str) -> bool:
+    """Return True for repos whose tests require the seed image's Node runtime."""
+    normalized = seed_image.lower().replace(".", "/").replace("__", "/")
+    return "tutao/tutanota" in normalized
+
+
 def _extract_seed_image(pull_command: str) -> str:
     """Extract the image reference from a 'docker pull <image>' string."""
     parts = pull_command.strip().split()
@@ -318,9 +324,11 @@ def build_task_image(task_dir: Path, *, force: bool = False) -> str:
 
         # Build final image: temp_image + Node 20 + npm deps via Dockerfile.task_runtime.
         try:
+            preserve_node = "1" if _should_preserve_task_node(seed_image) else "0"
             run_command(
                 ["docker", "build",
                  "--build-arg", f"BASE_IMAGE={temp_image}",
+                 "--build-arg", f"HALT_BENCH_PRESERVE_TASK_NODE={preserve_node}",
                  "-t", image_tag,
                  "-f", str(_DOCKERFILE),
                  "."],

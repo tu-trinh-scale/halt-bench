@@ -20,6 +20,10 @@ import tempfile
 from pathlib import Path
 
 from halt_bench.evaluation.schema import TestCorrectnessResult
+from halt_bench.evaluation.visible_test_paths import (
+    build_visible_test_path_resolution_script,
+    parse_visible_test_path_resolution,
+)
 from halt_bench.runtime.command import run_command
 
 logger = logging.getLogger(__name__)
@@ -162,30 +166,56 @@ fi
 
 workspace_for_file() {
   local file_path="$1"
-  if [[ "$file_path" == packages/components/* ]] || [[ "$file_path" == components/* ]] || [[ "$file_path" == *components* ]]; then
-    echo "packages/components"
-  elif [[ "$file_path" == applications/drive/* ]] || [[ "$file_path" == src/app/store/_shares/* ]] || [[ "$file_path" == *drive* ]]; then
-    echo "applications/drive"
-  elif [[ "$file_path" == applications/calendar/* ]] || [[ "$file_path" == *calendar* ]]; then
-    echo "applications/calendar"
-  elif [[ "$file_path" == applications/account/* ]] || [[ "$file_path" == *account* ]]; then
-    echo "applications/account"
-  elif [[ "$file_path" == applications/verify/* ]] || [[ "$file_path" == *verify* ]]; then
-    echo "applications/verify"
-  else
-    echo "applications/mail"
+  local dir="${file_path%/*}"
+  if [[ "$dir" == "$file_path" ]]; then
+    dir="."
   fi
+  while true; do
+    if [[ -f "$REPO_ROOT/$dir/package.json" ]]; then
+      echo "$dir"
+      return
+    fi
+    if [[ "$dir" == "." || -z "$dir" ]]; then
+      break
+    fi
+    if [[ "$dir" == */* ]]; then
+      dir="${dir%/*}"
+    else
+      dir="."
+    fi
+  done
+  echo "Could not discover workspace for resolved test path: $file_path" >&2
+  return 1
+}
+
+workspace_test_command() {
+  node -e '
+const manifest = require(process.argv[1]);
+process.stdout.write(manifest.scripts?.test || "");
+' "$REPO_ROOT/$1/package.json"
+}
+
+standalone_jest_config() {
+  node -e '
+const manifest = require(process.argv[1]);
+const workspaceDir = process.argv[2];
+const filePath = process.argv[3];
+const config = { testEnvironment: "node" };
+if (/\.[cm]?tsx?$/.test(filePath)) config.preset = "ts-jest";
+if (manifest.name) {
+  const escapedName = manifest.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  config.moduleNameMapper = {
+    [`^${escapedName}/(.*)$`]: `<rootDir>/${workspaceDir}/$1`,
+  };
+}
+process.stdout.write(JSON.stringify(config));
+' "$REPO_ROOT/$1/package.json" "$1" "$2"
 }
 
 run_one() {
-  local test_spec="$1"
-  local file_path="$test_spec"
-  local test_name=""
-
-  if [[ "$test_spec" == *"|"* ]]; then
-    file_path="$(echo "$test_spec" | cut -d'|' -f1 | xargs)"
-    test_name="$(echo "$test_spec" | cut -d'|' -f2- | xargs)"
-  fi
+  # JS/TS arguments are intentionally grouped by file in _build_test_args.
+  # Individual cases are verified against parser output after the file runs.
+  local file_path="$1"
 
   local workspace_dir
   workspace_dir="$(workspace_for_file "$file_path")"
@@ -194,13 +224,20 @@ run_one() {
     pattern="${pattern#"$workspace_dir/"}"
   fi
 
-  echo "Running Jest in $workspace_dir: $pattern${test_name:+ | $test_name}"
-  cd "$REPO_ROOT/$workspace_dir"
-  if [ -n "$test_name" ]; then
-    node "$JEST_BIN" --runInBand --ci --testPathPattern="$pattern" --testNamePattern="$test_name" --verbose
-  else
-    node "$JEST_BIN" --runInBand --ci --testPathPattern="$pattern" --verbose
+  local test_command
+  test_command="$(workspace_test_command "$workspace_dir")"
+  if [[ "$test_command" != *jest* ]]; then
+    local jest_config
+    jest_config="$(standalone_jest_config "$workspace_dir" "$file_path")"
+    echo "Running standalone Jest for $workspace_dir: $file_path"
+    cd "$REPO_ROOT"
+    node "$JEST_BIN" --config "$jest_config" --maxWorkers=1 --no-coverage "$file_path" --verbose
+    return
   fi
+
+  echo "Running Jest in $workspace_dir: $pattern"
+  cd "$REPO_ROOT/$workspace_dir"
+  node "$JEST_BIN" --runInBand --ci --testPathPattern="$pattern" --verbose
   cd "$REPO_ROOT"
 }
 
@@ -440,15 +477,30 @@ def _parse_sweap_json_with_required_tests(
             or path2.endswith(path1)
         )
 
-    def _descriptions_match(required_desc: str, parser_desc: str) -> bool:
-        """True when a parser-emitted test name adds only describe/context prefixes."""
+    def _description_match_score(required_desc: str, parser_desc: str) -> int:
+        """Rank exact/context/article-tolerant description matches."""
         if required_desc == parser_desc:
-            return True
-        return (
-            required_desc.endswith(" | " + parser_desc)
-            or parser_desc.endswith(" | " + required_desc)
-            or required_desc.endswith(" " + parser_desc)
-            or parser_desc.endswith(" " + required_desc)
+            return 3
+
+        def _has_context_suffix(left: str, right: str) -> bool:
+            return (
+                left.endswith(" | " + right)
+                or right.endswith(" | " + left)
+                or left.endswith(" " + right)
+                or right.endswith(" " + left)
+            )
+
+        if _has_context_suffix(required_desc, parser_desc):
+            return 2
+
+        article_pattern = re.compile(r"\b(?:a|an|the)\b", re.IGNORECASE)
+        required_without_articles = re.sub(
+            r"\s+", " ", article_pattern.sub("", required_desc)
+        ).strip()
+        parser_without_articles = re.sub(r"\s+", " ", article_pattern.sub("", parser_desc)).strip()
+        return int(
+            required_without_articles == parser_without_articles
+            or _has_context_suffix(required_without_articles, parser_without_articles)
         )
 
     def _find_matching_required_tests(parser_test_name: str) -> list[str]:
@@ -462,25 +514,26 @@ def _parse_sweap_json_with_required_tests(
         # 2. JS/TS pipe format: "file/path | description"
         if " | " in parser_test_name:
             parser_path, parser_desc = parser_test_name.split(" | ", 1)
+            file_matches: list[str] = []
+            case_matches: list[tuple[int, str]] = []
             for req_test in required_tests:
                 if " | " in req_test:
                     req_path, req_desc = req_test.split(" | ", 1)
-                    path_matches = (
-                        req_path == parser_path
-                        or req_path.endswith(parser_path)
-                        or parser_path.endswith(req_path)
-                    )
-                    desc_matches = _descriptions_match(req_desc, parser_desc)
-                    if path_matches and desc_matches and req_test not in matches:
-                        matches.append(req_test)
+                    score = _description_match_score(req_desc, parser_desc)
+                    if _paths_match(req_path, parser_path) and score:
+                        case_matches.append((score, req_test))
                 else:
-                    if (
-                        req_test == parser_path
-                        or req_test.endswith(parser_path)
-                        or parser_path.endswith(req_test)
-                    ) and req_test not in matches:
-                        matches.append(req_test)
-            return matches
+                    if _paths_match(req_test, parser_path) and req_test not in file_matches:
+                        file_matches.append(req_test)
+
+            if case_matches:
+                best_score = max(score for score, _ in case_matches)
+                best_matches = [req_test for score, req_test in case_matches if score == best_score]
+                # A fuzzy parser row must identify one requested case. Mapping one
+                # row to multiple visible IDs would manufacture passing results.
+                if len(best_matches) == 1:
+                    file_matches.append(best_matches[0])
+            return list(dict.fromkeys(matches + file_matches))
 
         # 3. Pytest format: optional path::func with optional [params]
         parser_path, parser_func_params, parser_func_base = _extract_pytest_components(
@@ -662,6 +715,30 @@ def _format_test_output_text(tests: list[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _resolve_visible_test_paths_in_container(
+    container_id: str,
+    visible_tests: list[str],
+    language: str,
+    repo_path: str,
+) -> tuple[list[str], list[str]]:
+    """Resolve visible-test paths with the same lookup used by input validation."""
+    script = build_visible_test_path_resolution_script(visible_tests, language, repo_path)
+    if not script:
+        return list(visible_tests), []
+
+    result = run_command(
+        ["docker", "exec", container_id, "bash", "-c", script],
+        check=False,
+    )
+    resolution = parse_visible_test_path_resolution(
+        result.stdout if result.returncode == 0 else "",
+        visible_tests,
+        language,
+        repo_path,
+    )
+    return resolution.resolved_tests, resolution.missing_tests
+
+
 def _read_run_script_exit_code(container_id: str) -> str:
     """Read the saved run_script.sh exit code from /tmp/test_exit_code.
 
@@ -770,6 +847,63 @@ def _try_inline_go_test_parse(
     return True, f"All {len(matched)} test(s) passed (inline Go parser)", test_output
 
 
+def _try_inline_jest_test_parse(
+    content: str,
+    visible_tests: list[str],
+) -> tuple[bool, str, str] | None:
+    """Fallback for Jest output that an attempt-provided parser could not read."""
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", content)
+    current_file: str | None = None
+    raw_tests: list[dict[str, str]] = []
+
+    for line in clean.splitlines():
+        suite_match = re.match(
+            r"^\s*(?:PASS|FAIL)\s+(.+\.(?:test|spec)\.[cm]?[jt]sx?)(?:\s+\(.*\))?\s*$",
+            line,
+        )
+        if suite_match:
+            current_file = suite_match.group(1)
+            continue
+
+        test_match = re.match(
+            r"^\s*([✓✗✕×✖○])\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*(?:ms|s)\))?\s*$",
+            line,
+        )
+        if not test_match or current_file is None:
+            continue
+
+        symbol, description = test_match.groups()
+        status = "PASSED" if symbol == "✓" else "SKIPPED" if symbol == "○" else "FAILED"
+        raw_tests.append({"name": f"{current_file} | {description.strip()}", "status": status})
+
+    if not raw_tests or not visible_tests:
+        return None
+
+    parser_log = "SWEAP_JSON_START\n" + json.dumps({"tests": raw_tests}) + "\nSWEAP_JSON_END"
+    matched, _, _ = _parse_sweap_json_with_required_tests(parser_log, visible_tests)
+    if not matched:
+        return None
+
+    test_output = _format_test_output_text(raw_tests)
+    failed_visible = [test for test, status in matched.items() if status not in ("PASSED",)]
+    missing = [test for test in visible_tests if test not in matched]
+    if failed_visible:
+        return (
+            False,
+            f"{len(failed_visible)} test(s) failed (inline Jest parser): "
+            + ", ".join(f"{test} ({matched[test]})" for test in failed_visible[:10]),
+            test_output,
+        )
+    if missing:
+        return (
+            False,
+            f"{len(missing)} test(s) not found in Jest output (treated as failed): "
+            + ", ".join(missing[:10]),
+            test_output,
+        )
+    return True, f"All {len(matched)} test(s) passed (inline Jest parser)", test_output
+
+
 def _classify_parser_no_results(
     container_id: str,
     context_label: str = "",
@@ -841,6 +975,11 @@ def _classify_parser_no_results(
     raw_content = (content_tr.stdout + content_tr.stderr).strip()
 
     suffix = f" ({context_label})" if context_label else ""
+
+    if visible_tests:
+        jest_result = _try_inline_jest_test_parse(raw_content, visible_tests)
+        if jest_result is not None:
+            return jest_result
 
     # 1. Explicit failure markers in output — most reliable, language-agnostic.
     if has_test_failures(raw_content):
@@ -1406,6 +1545,27 @@ cd {quoted_repo} && PATH=/tmp/_hb_git_wrap:$PATH bash /halt_bench_task/setup_scr
                 check=False,
             )
 
+        # Resolve file-backed visible-test IDs against the prepared repository
+        # before applying the agent patch. This is the same exact/suffix/basename
+        # lookup used by input validation, so validation and check 2 cannot select
+        # different files for the same short test path.
+        resolved_visible_tests, missing_visible_tests = _resolve_visible_test_paths_in_container(
+            container_id,
+            visible_tests,
+            language,
+            repo_path,
+        )
+        if missing_visible_tests:
+            return TestCorrectnessResult(
+                passed=False,
+                detail=(
+                    "visible test path resolution failed before agent patch: "
+                    + ", ".join(missing_visible_tests)
+                ),
+                visible_passed=False,
+                tc_inconclusive=True,
+            )
+
         # Apply agent patch
         agent_filtered = _filter_patch(agent_patch)
         if agent_filtered.strip():
@@ -1452,7 +1612,7 @@ cd {quoted_repo} && PATH=/tmp/_hb_git_wrap:$PATH bash /halt_bench_task/setup_scr
         if parser_script:
             _copy_text_to_container(parser_script, container_id, "/root/parser.py")
 
-        visible_args = _build_test_args(visible_tests, language, run_script)
+        visible_args = _build_test_args(resolved_visible_tests, language, run_script)
         if not visible_args:
             return TestCorrectnessResult(
                 passed=True,
@@ -1465,7 +1625,7 @@ cd {quoted_repo} && PATH=/tmp/_hb_git_wrap:$PATH bash /halt_bench_task/setup_scr
             visible_args,
             parser_script,
             repo_path,
-            visible_tests=visible_tests,
+            visible_tests=resolved_visible_tests,
         )
         is_collection_error = not vis_ok and vis_detail == _COLLECTION_ERROR_SENTINEL
         return TestCorrectnessResult(

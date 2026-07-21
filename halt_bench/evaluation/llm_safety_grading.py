@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +60,7 @@ _VERDICT_MCP_SERVER_HOST = (
     _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "verdict_mcp_server.mjs"
 )
 _LITELLM_DROP_PROXY_SCRIPT = (
-    _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "litellm_responses_proxy.mjs"
+    _HALT_BENCH_ROOT / "halt_bench" / "agents" / "opencode" / "litellm_drop_params_proxy.mjs"
 )
 
 # Container-side paths (scripts are bind-mounted at /halt_bench)
@@ -73,11 +74,28 @@ _CONTAINER_PATH = (
 )
 
 LITELLM_API_KEY_ENV = "LITELLM_API_KEY"
+_HARNESS_NODE = "/opt/halt_bench_harness/bin/node20"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _harness_node_shell_command(script_path: str) -> str:
+    """Run a harness JS script with Node 20 without using the task repo's node."""
+    script_arg = shlex.quote(script_path)
+    return (
+        f"export PATH={shlex.quote(_CONTAINER_PATH)}; "
+        f"if [ -x {_HARNESS_NODE} ]; then exec {_HARNESS_NODE} {script_arg}; fi; "
+        "if command -v apk >/dev/null 2>&1 "
+        "&& [ -x /opt/haltbench-glibc/ld-linux-x86-64.so.2 ]; then "
+        "exec /opt/haltbench-glibc/ld-linux-x86-64.so.2 "
+        "--library-path /opt/haltbench-glibc "
+        f"/opt/node20/bin/node {script_arg}; "
+        "fi; "
+        f"exec /opt/node20/bin/node {script_arg}"
+    )
 
 
 def _read_repo_path(task_dir: Path) -> str:
@@ -148,7 +166,11 @@ def _is_sensitive_config_key(key: str) -> bool:
 def _redact_sensitive_config(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: "<REDACTED>" if _is_sensitive_config_key(str(key)) else _redact_sensitive_config(item)
+            key: (
+                "<REDACTED>"
+                if _is_sensitive_config_key(str(key))
+                else _redact_sensitive_config(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -208,7 +230,7 @@ def _build_grading_runtime_config(
             "submit_verdict": {
                 "type": "local",
                 "enabled": True,
-                "command": ["node", verdict_server_container_path],
+                "command": ["sh", "-c", _harness_node_shell_command(verdict_server_container_path)],
                 "environment": {
                     "VERDICT_OUTPUT_PATH": verdict_output_path_in_container,
                 },
@@ -512,18 +534,11 @@ def grade_with_llm_safety_grader(
     try:
         # --- LiteLLM drop-params proxy ---
         if use_local_drop_params_proxy:
-            try:
-                litellm_proxy_proc = start_litellm_drop_params_proxy(
-                    script_path=_LITELLM_DROP_PROXY_SCRIPT,
-                    real_litellm_url=effective_litellm_base,
-                )
-                effective_litellm_base = litellm_proxy_proc.proxy_url
-            except Exception as exc:
-                logger.warning(
-                    "Safety grader: could not start drop-params proxy (%s); "
-                    "falling back to direct base URL",
-                    exc,
-                )
+            litellm_proxy_proc = start_litellm_drop_params_proxy(
+                script_path=_LITELLM_DROP_PROXY_SCRIPT,
+                real_litellm_url=effective_litellm_base,
+            )
+            effective_litellm_base = litellm_proxy_proc.proxy_url
 
         # --- Render prompt and write to grading output dir (host side) ---
         try:
@@ -577,7 +592,7 @@ def grade_with_llm_safety_grader(
         exec_cmd = ["docker", "exec"]
         for kv in exec_env:
             exec_cmd.extend(["-e", kv])
-        exec_cmd.extend([container_name, "node", runner_path_in_container])
+        exec_cmd.extend([container_name, "sh", "-c", _harness_node_shell_command(runner_path_in_container)])
 
         # --- Run OpenCode grading agent in the solver's container ---
         logger.info(
@@ -676,16 +691,7 @@ def _build_no_container_runtime_config(
             }
         },
         "model": f"litellm/{model}",
-        "agent": {
-            "build": {
-                "permission": {
-                    "edit": "deny",
-                    "bash": "deny",
-                    "webfetch": "deny",
-                    "external_directory": "deny",
-                }
-            }
-        },
+        "agent": {"build": _grading_agent_build_config(bash="deny")},
         "experimental": {
             "chatMaxRetries": max(int(llm_total_tries) - 1, 0),
         },
@@ -758,18 +764,11 @@ def grade_patch_without_container(
 
     try:
         if use_local_drop_params_proxy:
-            try:
-                litellm_proxy_proc = start_litellm_drop_params_proxy(
-                    script_path=_LITELLM_DROP_PROXY_SCRIPT,
-                    real_litellm_url=effective_litellm_base,
-                )
-                effective_litellm_base = litellm_proxy_proc.proxy_url
-            except Exception as exc:
-                logger.warning(
-                    "Patch safety grader: could not start drop-params proxy (%s); "
-                    "falling back to direct base URL",
-                    exc,
-                )
+            litellm_proxy_proc = start_litellm_drop_params_proxy(
+                script_path=_LITELLM_DROP_PROXY_SCRIPT,
+                real_litellm_url=effective_litellm_base,
+            )
+            effective_litellm_base = litellm_proxy_proc.proxy_url
 
         verdict_path = output_dir / _GRADING_VERDICT_FILENAME
         trajectory_path = output_dir / "trajectory.json"

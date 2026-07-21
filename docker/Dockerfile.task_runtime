@@ -25,7 +25,9 @@ ARG BASE_IMAGE
 FROM --platform=linux/amd64 node:20-bookworm-slim AS node_runtime
 
 ARG BASE_IMAGE
+ARG HALT_BENCH_PRESERVE_TASK_NODE=0
 FROM ${BASE_IMAGE}
+ARG HALT_BENCH_PRESERVE_TASK_NODE=0
 
 # ── Node.js runtime bootstrap ─────────────────────────────────────────────────
 # Copy the full Node 20 toolchain from the node_runtime stage so we have a
@@ -41,15 +43,47 @@ COPY --from=node_runtime /lib/x86_64-linux-gnu/libdl.so.2         /opt/haltbench
 COPY --from=node_runtime /lib/x86_64-linux-gnu/librt.so.1         /opt/haltbench-glibc/
 COPY --from=node_runtime /lib/x86_64-linux-gnu/libresolv.so.2     /opt/haltbench-glibc/
 COPY --from=node_runtime /lib64/ld-linux-x86-64.so.2              /opt/haltbench-glibc/
+# libstdc++ from glibc stage silences version-mismatch warnings when running the
+# glibc Node 20 binary on Alpine (which has a musl libstdc++ stub without version symbols).
+COPY --from=node_runtime /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /opt/haltbench-glibc/
 
-# Install Node.js:
+# Create a stable harness-only Node 20 wrapper.  On Alpine/musl images the
+# glibc Node binary must be launched through the copied glibc loader; running
+# /opt/node20/bin/node directly can fail with missing musl symbols such as
+# fcntl64.  This wrapper is intentionally not placed on the final PATH so task
+# tests keep using the repo's own node/npm runtime.
+RUN set -e; \
+    if command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache libc6-compat gcompat; \
+    fi; \
+    mkdir -p /opt/halt_bench_harness/bin; \
+    if command -v apk >/dev/null 2>&1; then \
+        printf '#!/bin/sh\nexec /opt/haltbench-glibc/ld-linux-x86-64.so.2 --library-path /opt/haltbench-glibc /opt/node20/bin/node "$@"\n' \
+            > /opt/halt_bench_harness/bin/node20; \
+    else \
+        printf '#!/bin/sh\nexec /opt/node20/bin/node "$@"\n' \
+            > /opt/halt_bench_harness/bin/node20; \
+    fi; \
+    chmod +x /opt/halt_bench_harness/bin/node20; \
+    ln -sf /opt/halt_bench_harness/bin/node20 /opt/halt_bench_harness/bin/node; \
+    /opt/halt_bench_harness/bin/node20 --version
+
+# Install task-visible Node.js:
+#   - Repo-specific legacy images can preserve their preinstalled Node because
+#     some test suites are not compatible with Node 20.
 #   - If image already has Node >=18, reuse it.
-#   - Alpine: install via apk (musl-native node) + add glibc compat so .opencode runs.
-#     Some Alpine SWE-bench images ship Node 16 at /usr/local/bin/node which would
-#     shadow the freshly-installed package (placed at /usr/bin/node by apk).
-#     We explicitly overwrite /usr/local/bin/node after apk to fix that shadow.
+#   - Alpine (musl): `apk add nodejs` gives Node 18 but installs to /usr/bin/node,
+#     which is shadowed by any pre-existing /usr/local/bin/node from the seed image
+#     (e.g. Node 16).  Instead, write a thin wrapper at /usr/local/bin/node that
+#     invokes the glibc Node 20 binary from the node_runtime stage via the glibc
+#     shim loader — guaranteed Node 20 regardless of what the seed image had.
 #   - Other (Debian/Ubuntu/…): copy Node 20 binaries from node_runtime stage.
 RUN set -e; \
+    if [ "${HALT_BENCH_PRESERVE_TASK_NODE}" = "1" ] && command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then \
+        echo "Preserving task image Node $(node -v) for repo test compatibility"; \
+        node --version; npm --version; \
+        exit 0; \
+    fi; \
     if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then \
         NODE_MAJOR="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"; \
         if [ "${NODE_MAJOR}" -ge 18 ]; then \
@@ -59,12 +93,13 @@ RUN set -e; \
         fi; \
     fi; \
     if command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache nodejs npm libc6-compat gcompat; \
-        if [ -f /usr/bin/node ]; then \
-            cp -f /usr/bin/node /usr/local/bin/node; \
-            printf '#!/bin/sh\nexec /usr/bin/npm "$@"\n' > /usr/local/bin/npm && chmod 755 /usr/local/bin/npm; \
-            printf '#!/bin/sh\nexec /usr/bin/npx "$@"\n' > /usr/local/bin/npx && chmod 755 /usr/local/bin/npx || true; \
-        fi; \
+        apk add --no-cache libc6-compat gcompat; \
+        printf '#!/bin/sh\nexec /opt/haltbench-glibc/ld-linux-x86-64.so.2 --library-path /opt/haltbench-glibc /opt/node20/bin/node "$@"\n' \
+            > /usr/local/bin/node; \
+        chmod +x /usr/local/bin/node; \
+        ln -sf /opt/node20/bin/npm /usr/local/bin/npm; \
+        ln -sf /opt/node20/bin/npx /usr/local/bin/npx; \
+        ln -sf /opt/node20/bin/corepack /usr/local/bin/corepack; \
     else \
         cp -a /opt/node20/. /usr/local/; \
     fi && \
@@ -75,11 +110,16 @@ RUN set -e; \
 # at run time so edits deploy instantly without rebuilds.
 WORKDIR /opt/halt_bench_harness
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev 2>&1
+RUN PATH="/opt/halt_bench_harness/bin:/opt/node20/bin:${PATH}" npm ci --omit=dev 2>&1
 
-# Expose node_modules/.bin on PATH so `node`, `opencode`, etc. resolve without
-# full paths.  The task repo's WORKDIR is restored below.
+# Expose node_modules/.bin on PATH.  `node` remains the task image's repo
+# runtime when HALT_BENCH_PRESERVE_TASK_NODE=1; the harness explicitly invokes
+# /opt/node20/bin/node for OpenCode.
 ENV PATH="/opt/halt_bench_harness/node_modules/.bin:/usr/local/bin:${PATH}"
+
+# Restore the task repo as the working directory so the agent container starts
+# inside the repo root, matching hil_bench_agent.py's Dockerfile convention.
+WORKDIR /app
 
 # ── ripgrep ───────────────────────────────────────────────────────────────────
 # OpenCode's built-in grep/glob tools shell out to `rg`.  Install best-effort:

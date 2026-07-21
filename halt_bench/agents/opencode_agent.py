@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -23,12 +24,53 @@ _HALT_BENCH_ROOT: Path = Path(__file__).resolve().parents[2]
 
 # PATH inside the task container.
 # /opt/halt_bench_harness/node_modules/.bin  — opencode CLI, sdk binaries (baked into task image)
-# /usr/local/bin                             — node binary (baked into task image)
+# /usr/local/bin                             — task repo's node/npm runtime
+# /opt/halt_bench_harness/bin/node20         — harness Node used explicitly for OpenCode
 # standard Linux paths
 _CONTAINER_PATH = (
     "/opt/halt_bench_harness/node_modules/.bin"
     ":/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
+_HARNESS_NODE = "/opt/halt_bench_harness/bin/node20"
+
+
+def _container_state_summary(container_name: str) -> str:
+    inspect = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            container_name,
+            "--format",
+            "status={{.State.Status}} running={{.State.Running}} "
+            "exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if inspect.returncode != 0:
+        return inspect.stderr.strip()
+
+    logs = subprocess.run(
+        ["docker", "logs", "--tail", "40", container_name],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    log_text = (logs.stdout + logs.stderr).strip()
+    if log_text:
+        return f"{inspect.stdout.strip()} logs={log_text}"
+    return inspect.stdout.strip()
+
+
+def _container_is_running(container_name: str) -> bool:
+    inspect = subprocess.run(
+        ["docker", "inspect", container_name, "--format", "{{.State.Running}}"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return inspect.returncode == 0 and inspect.stdout.strip() == "true"
 
 
 def _read_repo_path_in_image(task_dir: Path) -> str:
@@ -85,9 +127,9 @@ def _start_task_container(
     /halt_bench_output ← output_dir         (rw)  outputs written back to host
     ────────────────────────────────────────────────────────────────────────
 
-    Node.js and node_modules are baked into the task image at
-    /opt/halt_bench_harness/node_modules and /usr/local/bin/node (see
-    docker/Dockerfile.task_runtime, applied during task creation).
+    The OpenCode harness Node.js runtime is baked into the task image at
+    /opt/halt_bench_harness/bin/node20, while the task repo's own node/npm may
+    remain on PATH for repo-specific test compatibility.
 
     --network host lets the container reach 127.0.0.1-bound host services
     (LiteLLM proxy, ask_human sidecar) without URL rewriting.
@@ -137,8 +179,20 @@ def _start_task_container(
                 timeout=300,
             )
             if start_result.returncode == 0:
-                logger.info("Task container %r started", container_name)
-                return
+                for _ in range(10):
+                    if _container_is_running(container_name):
+                        logger.info("Task container %r started", container_name)
+                        return
+                    time.sleep(0.5)
+                last_error = _container_state_summary(container_name)
+                logger.warning(
+                    "docker start returned success for %r on attempt %d/3, "
+                    "but the container is not running: %s",
+                    container_name,
+                    attempt,
+                    last_error,
+                )
+                continue
             last_error = start_result.stderr.decode(errors="replace").strip()
             logger.warning(
                 "docker start failed for %r on attempt %d/3: %s",
@@ -163,17 +217,64 @@ def _start_task_container(
 
 def _verify_node_in_container(container_name: str) -> None:
     """Verify Node.js is available in the task container."""
-    result = subprocess.run(
-        ["docker", "exec", "-e", f"PATH={_CONTAINER_PATH}", container_name, "node", "--version"],
-        capture_output=True,
-        timeout=15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Node.js not found in task container {container_name!r}. "
-            f"Was the task image built with Dockerfile.task_runtime? stderr: {result.stderr.decode().strip()}"
+    last_stderr = ""
+    for attempt in range(1, 6):
+        if not _container_is_running(container_name):
+            last_stderr = _container_state_summary(container_name)
+            logger.warning(
+                "Task container %r is not running before node verification "
+                "on attempt %d/5: %s",
+                container_name,
+                attempt,
+                last_stderr,
+            )
+            restart = subprocess.run(
+                ["docker", "start", container_name],
+                capture_output=True,
+                timeout=60,
+            )
+            if restart.returncode != 0:
+                last_stderr = restart.stderr.decode(errors="replace").strip()
+            time.sleep(1)
+            continue
+
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-e",
+                f"PATH={_CONTAINER_PATH}",
+                container_name,
+                "node",
+                "--version",
+            ],
+            capture_output=True,
+            timeout=15,
         )
-    logger.debug("Node.js in %r: %s", container_name, result.stdout.decode().strip())
+        if result.returncode == 0:
+            logger.debug("Node.js in %r: %s", container_name, result.stdout.decode().strip())
+            return
+
+        last_stderr = result.stderr.decode(errors="replace").strip()
+        if any(
+            marker in last_stderr
+            for marker in (
+                "is not running",
+                "unable to upgrade to tcp",
+                "No such exec instance",
+                "context canceled",
+            )
+        ):
+            time.sleep(1)
+            continue
+
+        break
+
+    raise RuntimeError(
+        f"Node.js not found in task container {container_name!r}. "
+        f"Was the task image built with Dockerfile.task_runtime? "
+        f"stderr: {last_stderr}; container_state: {_container_state_summary(container_name)}"
+    )
 
 
 def _read_error_details(result_path: Path, debug_path: Path) -> str:
@@ -216,7 +317,11 @@ def _is_sensitive_config_key(key: str) -> bool:
 def _redact_sensitive_config(value):
     if isinstance(value, dict):
         return {
-            key: "<REDACTED>" if _is_sensitive_config_key(str(key)) else _redact_sensitive_config(item)
+            key: (
+                "<REDACTED>"
+                if _is_sensitive_config_key(str(key))
+                else _redact_sensitive_config(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -345,9 +450,9 @@ class OpenCodeAgent(HaltAgent):
             else:
                 raise RuntimeError(
                     "OpenCode SDK runner requires a LiteLLM/OpenAI-compatible base URL. "
-                    "Set LITELLM_BASE_URL or use --solver-backend direct."
+                    "Set --opencode-litellm-base-url or LITELLM_BASE_URL."
                 )
-            if not litellm_api_key:
+            if not litellm_api_key and not self.config.litellm_direct:
                 raise RuntimeError(
                     f"OpenCode SDK runner requires {self.config.litellm_api_key_env} in environment."
                 )
@@ -436,7 +541,19 @@ class OpenCodeAgent(HaltAgent):
             exec_cmd = ["docker", "exec"]
             for key, val in container_env.items():
                 exec_cmd.extend(["-e", f"{key}={val}"])
-            exec_cmd.extend([container_name, "node", container_runner])
+            runner_arg = shlex.quote(container_runner)
+            harness_node_script = (
+                f"export PATH={shlex.quote(_CONTAINER_PATH)}; "
+                f"if [ -x {_HARNESS_NODE} ]; then exec {_HARNESS_NODE} {runner_arg}; fi; "
+                "if command -v apk >/dev/null 2>&1 "
+                "&& [ -x /opt/haltbench-glibc/ld-linux-x86-64.so.2 ]; then "
+                "exec /opt/haltbench-glibc/ld-linux-x86-64.so.2 "
+                "--library-path /opt/haltbench-glibc "
+                f"/opt/node20/bin/node {runner_arg}; "
+                "fi; "
+                f"exec /opt/node20/bin/node {runner_arg}"
+            )
+            exec_cmd.extend([container_name, "sh", "-c", harness_node_script])
 
             try:
                 command_result = run_command(

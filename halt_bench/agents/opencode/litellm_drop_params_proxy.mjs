@@ -41,6 +41,27 @@ function sanitizePayload(payload) {
         stats.stripped_params.reasoning_effort = (stats.stripped_params.reasoning_effort || 0) + 1;
       }
     }
+    // Claude/Anthropic models reject requests whose message list ends with an
+    // assistant message ("This model does not support assistant message prefill.
+    // The conversation must end with a user message.").
+    //
+    // OpenCode <=1.14.x uses assistant-prefill continuations between tool-call
+    // steps, which works for OpenAI/GPT/Gemini but is a hard 400 for Anthropic.
+    // Strip any trailing assistant message here so the conversation always ends
+    // with a user or tool message before reaching the Anthropic backend.
+    if (
+      typeof payload.model === "string" &&
+      payload.model.toLowerCase().includes("claude") &&
+      Array.isArray(payload.messages) &&
+      payload.messages.length > 0
+    ) {
+      const last = payload.messages[payload.messages.length - 1];
+      if (last && last.role === "assistant") {
+        payload.messages = payload.messages.slice(0, -1);
+        stats.stripped_params.claude_prefill_stripped =
+          (stats.stripped_params.claude_prefill_stripped || 0) + 1;
+      }
+    }
   }
   return payload;
 }
